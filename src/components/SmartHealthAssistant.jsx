@@ -147,7 +147,8 @@ function SmartHealthAssistant() {
     stopSpeaking();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
-    speechSynthesis.speak(utterance);
+    // speechSynthesis.speak(utterance);
+    responsiveVoice.speak(text, "US English Female");
     setStatus((prev) => ({ ...prev, isSpeaking: true }));
   };
 
