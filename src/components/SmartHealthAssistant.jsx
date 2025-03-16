@@ -59,6 +59,7 @@ function SmartHealthAssistant() {
   }, []);
 
   const startListening = () => {
+    console.log("startListening called");
     if (!recognitionRef.current) {
       setOutput("❌ Speech recognition is not supported in this browser.");
       return;
