@@ -1,186 +1,159 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
-const GROQ_API_KEY = "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";
+const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
 
-/**
- * SmartHealthAssistant Component
- * This component provides a smart health assistant that can diagnose symptoms
- * based on user input via speech recognition or text input.
- */
 function SmartHealthAssistant() {
   const [output, setOutput] = useState(
     "Press the mic to speak or type your symptoms below..."
   );
-  const [isListening, setIsListening] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [status, setStatus] = useState({
+    isListening: false,
+    isSpeaking: false,
+    isLoading: false,
+  });
   const [symptomInput, setSymptomInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
 
-  // Initialize speech recognition
+  const recognitionRef = useRef(null); // Store SpeechRecognition instance
+
   useEffect(() => {
-    // This ensures the SpeechRecognition is accessed only in browser environment
-    window.SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
+    if ("SpeechRecognition" in window || "webkitSpeechRecognition" in window) {
+      recognitionRef.current = new (window.SpeechRecognition ||
+        window.webkitSpeechRecognition)();
+      recognitionRef.current.lang = "en-US";
+      recognitionRef.current.interimResults = false;
 
-    // Set up event listeners for speech synthesis
-    const handleSpeechStart = () => setIsSpeaking(true);
-    const handleSpeechEnd = () => setIsSpeaking(false);
+      recognitionRef.current.onresult = (event) => {
+        let command = event.results[0][0].transcript
+          .trim()
+          .replace(/[.,!?]$/, "");
+        setOutput(`🎤 You said: "${command}"`);
+        getHealthDiagnosis(command);
+      };
+
+      recognitionRef.current.onerror = (event) => {
+        setOutput(
+          event.error === "not-allowed"
+            ? "⚠️ Microphone access is blocked. Enable it in browser settings."
+            : `⚠️ Error: ${event.error}`
+        );
+        setStatus((prev) => ({ ...prev, isListening: false }));
+      };
+
+      recognitionRef.current.onend = () =>
+        setStatus((prev) => ({ ...prev, isListening: false }));
+    }
+
+    const handleSpeechStart = () =>
+      setStatus((prev) => ({ ...prev, isSpeaking: true }));
+    const handleSpeechEnd = () =>
+      setStatus((prev) => ({ ...prev, isSpeaking: false }));
 
     speechSynthesis.addEventListener("start", handleSpeechStart);
     speechSynthesis.addEventListener("end", handleSpeechEnd);
 
-    // Clean up event listeners
     return () => {
       speechSynthesis.removeEventListener("start", handleSpeechStart);
       speechSynthesis.removeEventListener("end", handleSpeechEnd);
+      if (recognitionRef.current) recognitionRef.current.abort();
     };
   }, []);
 
-  /**
-   * Start listening for speech input
-   */
   const startListening = () => {
-    if (!window.SpeechRecognition) {
-      setOutput("Speech recognition is not supported in this browser.");
+    if (!recognitionRef.current) {
+      setOutput("❌ Speech recognition is not supported in this browser.");
       return;
     }
-
-    const recognition = new window.SpeechRecognition();
-    recognition.lang = "en-US";
-    recognition.interimResults = false;
-
-    setIsListening(true);
-    recognition.start();
-
-    recognition.onresult = (event) => {
-      let command = event.results[0][0].transcript.trim().toLowerCase();
-      command = command.replace(/[.,!?]$/, ""); // Remove trailing punctuation
-
-      setOutput(`You said: "${command}"`);
-      getHealthDiagnosis(command);
-    };
-
-    recognition.onerror = (event) => {
-      setOutput(`Error: ${event.error}`);
-      console.error("Speech recognition error:", event.error);
-      setIsListening(false);
-    };
-
-    recognition.onspeechend = () => {
-      recognition.stop();
-      setIsListening(false);
-    };
-
-    recognition.onend = () => {
-      console.log("Speech recognition ended");
-      setIsListening(false);
-    };
+    setStatus((prev) => ({ ...prev, isListening: true }));
+    recognitionRef.current.start();
   };
 
-  /**
-   * Handle form submission for symptom input
-   * @param {Event} e - The form submission event
-   */
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (symptomInput.trim()) {
-      setOutput(`You entered: "${symptomInput}"`);
-      getHealthDiagnosis(symptomInput);
-      setSymptomInput(""); // Clear input after submission
+    if (!symptomInput.trim()) return;
+    setOutput(`You entered: "${symptomInput}"`);
+    getHealthDiagnosis(symptomInput);
+    setSymptomInput("");
+  };
+
+  const getHealthDiagnosis = async (symptom) => {
+    setStatus((prev) => ({ ...prev, isLoading: true }));
+    try {
+      const response = await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${GROQ_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: "mixtral-8x7b-32768",
+            messages: [{ role: "user", content: generatePrompt(symptom) }],
+          }),
+        }
+      );
+
+      const data = await response.json();
+      setStatus((prev) => ({ ...prev, isLoading: false }));
+
+      if (!data.choices || data.choices.length === 0)
+        throw new Error("Invalid response from AI.");
+
+      const aiResponse = data.choices[0].message.content.trim();
+      const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("No JSON found in AI response");
+
+      const responseJSON = JSON.parse(jsonMatch[0]);
+      const diagnosisText = `Diagnosis:\n${responseJSON.SYMPTOM_DIAGNOSIS.join(
+        "\n"
+      )}`;
+      const remediesText = `\n\nRemedies:\n${responseJSON.SYMPTOM_REMEDIES.join(
+        "\n"
+      )}`;
+
+      setOutput((prev) => `${prev}\n\n${diagnosisText}${remediesText}`);
+      speakText(
+        `Possible diagnoses: ${responseJSON.SYMPTOM_DIAGNOSIS.join(
+          ", "
+        )}. Remedies include: ${responseJSON.SYMPTOM_REMEDIES.join(", ")}`
+      );
+    } catch (error) {
+      setStatus((prev) => ({ ...prev, isLoading: false }));
+      setOutput((prev) => `${prev}\n\nError contacting AI.`);
+      console.error("AI error:", error);
     }
   };
 
-  /**
-   * Get health diagnosis based on symptom input
-   * @param {string} symptom - The symptom input from the user
-   */
-  const getHealthDiagnosis = (symptom) => {
-    setIsLoading(true);
-    const promptText = `
+  const generatePrompt = (symptom) => `
     I have the following symptoms: "${symptom}".
-
+    
     Based on this, provide:
-    1. SYMPTOM_DIAGNOSIS: A list of possible conditions.
-    2. SYMPTOM_REMEDIES: A list of simple home remedies.
+    1. SYMPTOM_DIAGNOSIS: A list of possible conditions (maximum 6).
+    2. SYMPTOM_REMEDIES: A list of simple home remedies (maximum 6).
+
+    Ensure that you provide no more than **6** items for each list. Fewer items are allowed if necessary.
+
     Format the response in JSON like this:
     {
-        "SYMPTOM_DIAGNOSIS": ["Condition1", "Condition2"],
-        "SYMPTOM_REMEDIES": ["Remedy1", "Remedy2"]
+        "SYMPTOM_DIAGNOSIS": ["Condition1", "Condition2", ..., "Condition6"],
+        "SYMPTOM_REMEDIES": ["Remedy1", "Remedy2", ..., "Remedy6"]
     }
-    Only return valid JSON. Do not include extra explanations or text.`;
 
-    fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "mixtral-8x7b-32768",
-        messages: [{ role: "user", content: promptText }],
-      }),
-    })
-      .then((response) => response.json())
-      .then((data) => {
-        setIsLoading(false);
-        let aiResponse = data.choices[0].message.content.trim();
-        console.log("AI Response:", aiResponse);
+    Only return valid JSON. Do not include extra explanations or text.
+`;
 
-        try {
-          // Extract JSON from response using regex
-          const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-          if (!jsonMatch) throw new Error("No JSON found in AI response");
-
-          const responseJSON = JSON.parse(jsonMatch[0]); // Extracted JSON
-
-          let diagnosisText = `Diagnosis:\n${responseJSON.SYMPTOM_DIAGNOSIS.join(
-            "\n"
-          )}`;
-          let remediesText = `\n\nRemedies:\n${responseJSON.SYMPTOM_REMEDIES.join(
-            "\n"
-          )}`;
-
-          setOutput((prev) => `${prev}\n\n${diagnosisText}${remediesText}`);
-          speakText(
-            `Possible diagnoses: ${responseJSON.SYMPTOM_DIAGNOSIS.join(
-              ", "
-            )}. Remedies include: ${responseJSON.SYMPTOM_REMEDIES.join(", ")}`
-          );
-        } catch (error) {
-          console.error("Error parsing AI response:", error);
-          setOutput(
-            (prev) => `${prev}\n\nAI response is not in the correct format.`
-          );
-        }
-      })
-      .catch((error) => {
-        setIsLoading(false);
-        setOutput((prev) => `${prev}\n\nError contacting Groq AI.`);
-        console.error("Groq AI error:", error);
-      });
-  };
-
-  /**
-   * Speak the given text using speech synthesis
-   * @param {string} text - The text to be spoken
-   */
   const speakText = (text) => {
-    // Cancel any ongoing speech first
     stopSpeaking();
-
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
     speechSynthesis.speak(utterance);
-    setIsSpeaking(true);
+    setStatus((prev) => ({ ...prev, isSpeaking: true }));
   };
 
-  /**
-   * Stop any ongoing speech synthesis
-   */
   const stopSpeaking = () => {
     if (speechSynthesis.speaking) {
       speechSynthesis.cancel();
-      setIsSpeaking(false);
+      setStatus((prev) => ({ ...prev, isSpeaking: false }));
     }
   };
 
@@ -189,15 +162,13 @@ function SmartHealthAssistant() {
       <h1>&#x1F52C; Smart Health Assistant</h1>
 
       <div className='status-box'>
-        {isLoading ? (
+        {status.isLoading ? (
           <div className='loading-indicator'>Analyzing symptoms...</div>
         ) : (
           output
             .split("\n")
             .map((line, index) =>
-              line.includes("Diagnosis:") ? (
-                <strong key={index}>{line}</strong>
-              ) : line.includes("Remedies:") ? (
+              line.includes("Diagnosis:") || line.includes("Remedies:") ? (
                 <strong key={index}>{line}</strong>
               ) : (
                 <p key={index}>{line}</p>
@@ -214,12 +185,12 @@ function SmartHealthAssistant() {
             onChange={(e) => setSymptomInput(e.target.value)}
             placeholder='Type your symptoms here...'
             className='symptom-input'
-            disabled={isLoading}
+            disabled={status.isLoading}
           />
           <button
             type='submit'
             className='submit-button'
-            disabled={!symptomInput.trim() || isLoading}
+            disabled={!symptomInput.trim() || status.isLoading}
           >
             Submit
           </button>
@@ -230,13 +201,14 @@ function SmartHealthAssistant() {
         <button
           className='mic-button'
           onClick={startListening}
-          disabled={isListening || isLoading}
+          disabled={status.isListening || status.isLoading}
         >
           &#x1F399;
         </button>
 
-        {isSpeaking && (
+        {status.isSpeaking && (
           <button className='stop-button' onClick={stopSpeaking}>
+            {" "}
             &#x1F507;
           </button>
         )}
